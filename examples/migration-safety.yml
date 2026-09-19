@@ -1,0 +1,15 @@
+# Minimal: fail the pull request on error-severity findings.
+name: migration-safety
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  presift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nishu-sde/presift@v1
+        with:
+          paths: db/migrations
+          fail-on: error
+          license: ${{ secrets.PRESIFT_LICENSE }}

@@ -1,0 +1,14 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Boundary and launcher checks
+        run: python3 -m unittest discover -s tests -t . -v

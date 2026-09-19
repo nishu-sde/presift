@@ -1,0 +1,19 @@
+# Optional per-project settings. Put this next to your migrations or at the repository root;
+# Presift looks upward from the first path it is given.
+
+[rules]
+# Run everything (the default), or narrow it:
+# enable = ["MG001", "MG002"]
+disable = []
+
+[severity]
+# Downgrade a rule you review differently, rather than turning it off:
+# MG003 = "note"
+
+[paths]
+# Glob patterns skipped entirely — seed data, fixtures, throwaway scratch migrations.
+ignore = ["db/seeds/**", "**/*.rollback.sql"]
+
+[check]
+# Minimum severity that makes the run fail. The action input takes precedence.
+fail_on = "error"

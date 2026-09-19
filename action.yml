@@ -1,0 +1,55 @@
+name: "Presift — MySQL migration safety"
+description: "Presift checks MySQL migrations for locking, table-rebuilding and destructive changes before they merge. Runs entirely on your runner; your migration files never leave it."
+author: "Nishu"
+branding:
+  icon: "shield"
+  color: "orange"
+inputs:
+  paths:
+    description: "Space-separated files or directories containing .sql migrations"
+    required: false
+    default: "."
+  fail-on:
+    description: "Minimum severity that fails the step: error | warning | note | never"
+    required: false
+    default: "error"
+  sarif-file:
+    description: "If set, also write a SARIF 2.1.0 report to this path"
+    required: false
+    default: ""
+  rules:
+    description: "Comma-separated rule ids to enable (default: all)"
+    required: false
+    default: ""
+  license:
+    description: "Evaluation or organisation key (store it as a repository secret). Required: without a valid key the step fails with an entitlement message."
+    required: true
+  channel:
+    description: "Release channel: stable (default) or beta"
+    required: false
+    default: "stable"
+  core-version:
+    description: "Pin an exact Presift version instead of the newest on the channel"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Run Presift
+      shell: bash
+      env:
+        PRESIFT_LICENSE: ${{ inputs.license }}
+        PRESIFT_CHANNEL: ${{ inputs.channel }}
+        PRESIFT_CORE_VERSION: ${{ inputs.core-version }}
+        PRESIFT_CACHE_DIR: ${{ runner.temp }}/presift-cache
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        INPUT_RULES: ${{ inputs.rules }}
+      run: |
+        set -euo pipefail
+        args=(check --format text --fail-on "$INPUT_FAIL_ON" --github-annotations)
+        if [ -n "$INPUT_SARIF_FILE" ]; then args+=(--sarif-output "$INPUT_SARIF_FILE"); fi
+        if [ -n "$INPUT_RULES" ]; then args+=(--rules "$INPUT_RULES"); fi
+        # shellcheck disable=SC2086
+        python3 "${{ github.action_path }}/presift_launch.py" "${args[@]}" $INPUT_PATHS
