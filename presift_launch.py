@@ -25,7 +25,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-CLIENT_VERSION = "1.0.0"
+CLIENT_VERSION = "1.1.0"
 SERVICE_URL = os.environ.get("PRESIFT_SERVICE_URL", "https://api.presift.dev")
 TRIAL_URL = "https://presift.dev/trial"
 PRICING_URL = "https://presift.dev/pricing"
@@ -35,9 +35,11 @@ SUPPORTED_PLATFORMS = ("linux-x86_64",)
 NETWORK_TIMEOUT = 30
 MAX_ARTIFACT_BYTES = 200 * 1024 * 1024
 
-# Release verification keys. Public halves only; the private halves never leave the release job.
+# Release verification keys: the public halves of the release signing identities. Fixed in this file
+# on purpose — there is no environment override for the stable path, so a runner's environment cannot
+# change which identities are trusted. Rotation ships a new client version with a new key id.
 TRUSTED_KEYS: dict[str, str] = {
-    # "presift-release-1": "<base64url public key, embedded at first public release>",
+    "presift-release-1": "mG-w8vID8qixmyCipO7tF9Acxif1y52A_58kphZASgM",   # sha256 of the raw key: 495b42d811e33d11d8a5f11dce444d5d…
 }
 
 EXIT_OK, EXIT_FINDINGS, EXIT_REFUSED = 0, 1, 2
