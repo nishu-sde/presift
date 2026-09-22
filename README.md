@@ -35,25 +35,31 @@ jobs:
         with:
           paths: db/migrations
           fail-on: error
-          license: ${{ secrets.PRESIFT_LICENSE }}
 ```
+with `permissions:` set to `contents: read` **and `id-token: write`** for the evaluation (see below).
+Paid organisations add `license: ${{ secrets.PRESIFT_LICENSE }}` instead.
 
 More examples, including SARIF upload to code scanning, are in [`examples/`](examples).
 
-## Getting a key
+## Evaluation and keys
 
-Presift is a paid tool. A **30-day evaluation key** gives you the complete product — no reduced
-rule set, no watermark, no card: request one at [presift.dev/trial](https://presift.dev/trial).
-After that it is an annual subscription per organisation; see
-[presift.dev/pricing](https://presift.dev/pricing).
+**30-day evaluation, no key, no form.** Grant the job `permissions: id-token: write`. On its first run
+the launcher asks GitHub for the job's OIDC token and exchanges it, in memory, for a short-lived
+evaluation key bound to your GitHub organisation; nothing is copied, e-mailed or stored on your side.
+Every run repeats this automatically until the evaluation ends (30 days from the first run, one
+evaluation per organisation), after which the job stops with a message pointing at
+[presift.dev/pricing](https://presift.dev/pricing). Fork pull requests cannot start or use an
+evaluation (GitHub does not issue them an OIDC token). Outside GitHub Actions there is no evaluation.
 
-Store the key as a repository or organisation secret and pass it as the `license` input. The key is
-bound to a GitHub organisation: in Actions it must match the repository owner.
+**Paid organisations** receive an annual organisation key: store it as a repository or organisation
+secret and pass it as the `license` input. A supplied key is always used in preference to the
+evaluation, and it works outside Actions too. The key is bound to a GitHub organisation: in Actions
+it must match the repository owner.
 
 ## How the launcher obtains the core
 
-1. The launcher POSTs your key, the client version, the platform and the channel to the release
-   service.
+1. The launcher POSTs your key (or the short-lived evaluation key it just obtained), the client
+   version, the platform and the channel to the release service.
 2. The service answers with a release **manifest**, its **Ed25519 signature**, and a short-lived
    download URL.
 3. The launcher checks the manifest's shape, verifies the signature against a public key compiled
@@ -77,8 +83,8 @@ circumvented, or that the build is bit-for-bit reproducible. None of those are c
   platforms are not supported yet; the launcher refuses rather than guessing.
 - **Python 3.9+** on the runner (present on GitHub-hosted runners). The launcher uses only the
   standard library; nothing is installed.
-- Outbound HTTPS from the runner to the release service, once per new release version (afterwards
-  the cache is used).
+- Outbound HTTPS from the runner to the release service (and, for the evaluation, to GitHub's OIDC
+  endpoint) once per job; the release itself is re-downloaded only for a new version or an empty cache.
 
 ## Inputs
 
@@ -88,7 +94,7 @@ circumvented, or that the build is bit-for-bit reproducible. None of those are c
 | `fail-on` | `error` | minimum severity that fails the step: `error`, `warning`, `note`, `never` |
 | `sarif-file` | – | also write a SARIF 2.1.0 report to this path |
 | `rules` | all | comma-separated rule ids to enable |
-| `license` | **required** | evaluation or organisation key |
+| `license` | – | organisation key (paid); leave empty for the evaluation |
 | `channel` | `stable` | release channel |
 | `core-version` | newest | pin an exact Presift version |
 

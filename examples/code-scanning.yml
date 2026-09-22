@@ -4,6 +4,7 @@ on: [pull_request]
 permissions:
   contents: read
   security-events: write
+  id-token: write          # evaluation; omit when passing a paid license
 jobs:
   presift:
     runs-on: ubuntu-latest
@@ -14,7 +15,6 @@ jobs:
           paths: db/migrations
           fail-on: never          # let code scanning carry the signal
           sarif-file: presift.sarif
-          license: ${{ secrets.PRESIFT_LICENSE }}
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:

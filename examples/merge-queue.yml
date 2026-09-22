@@ -1,4 +1,4 @@
-# Fork pull requests do not receive repository secrets, so run the check where the secret exists:
+# Fork pull requests receive neither secrets nor an OIDC token, so run the check where the job has them:
 # in the merge queue, on the base repository, or on push to the default branch.
 name: migration-safety
 on:
@@ -7,6 +7,7 @@ on:
     branches: [main]
 permissions:
   contents: read
+  id-token: write          # evaluation; omit when passing a paid license
 jobs:
   presift:
     runs-on: ubuntu-latest
@@ -15,4 +16,3 @@ jobs:
       - uses: nishu-sde/presift@v1
         with:
           paths: db/migrations
-          license: ${{ secrets.PRESIFT_LICENSE }}

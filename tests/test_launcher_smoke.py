@@ -100,12 +100,49 @@ class Verification(unittest.TestCase):
             self.assertEqual(len(L.b64url_decode(value)), 32)
 
 
+class AttestedEvaluation(unittest.TestCase):
+    """The evaluation is requested only in GitHub Actions, only without a supplied key, and never touches the network first."""
+
+    def setUp(self):
+        self._saved = dict(os.environ); os.environ.clear(); os.environ.update(clean_env())
+        self.calls = []
+        self._orig = L.urllib.request.urlopen
+        L.urllib.request.urlopen = lambda *a, **k: self.calls.append(a) or (_ for _ in ()).throw(OSError("no network in tests"))
+
+    def tearDown(self):
+        L.urllib.request.urlopen = self._orig; os.environ.clear(); os.environ.update(self._saved)
+
+    def test_missing_id_token_permission_fails_closed_before_any_request(self):
+        os.environ["GITHUB_ACTIONS"] = "true"
+        self.assertEqual(L.main(["check", "x.sql"]), REFUSED); self.assertEqual(self.calls, [])
+
+    def test_fork_pull_request_never_requests_a_token(self):
+        os.environ.update({"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request", "GITHUB_HEAD_REF": "x",
+                           "GITHUB_REPOSITORY": "someone-else/repo", "GITHUB_REPOSITORY_OWNER": "us",
+                           L.OIDC_URL_ENV: "stub-never-contacted", L.OIDC_TOKEN_ENV: "t"})
+        self.assertEqual(L.main(["check", "x.sql"]), REFUSED); self.assertEqual(self.calls, [])
+
+    def test_outside_actions_no_evaluation_is_requested(self):
+        os.environ.update({L.OIDC_URL_ENV: "stub-never-contacted", L.OIDC_TOKEN_ENV: "t"})
+        self.assertEqual(L.main(["check", "x.sql"]), REFUSED); self.assertEqual(self.calls, [])
+
+    def test_supplied_key_takes_precedence(self):
+        os.environ.update({"GITHUB_ACTIONS": "true", L.KEY_ENV: "PS1.x.y", L.OIDC_URL_ENV: "stub-never-contacted", L.OIDC_TOKEN_ENV: "t"})
+        L.main(["check", "x.sql"])
+        self.assertTrue(all("oidc" not in str(getattr(a[0], "full_url", a[0])) for a in self.calls))
+
+    def test_audience_is_exactly_the_production_api(self):
+        self.assertEqual(L.OIDC_AUDIENCE, "https://api.presift.dev")
+        self.assertEqual(L.SERVICE_URL, "https://api.presift.dev")
+
+
 class Contract(unittest.TestCase):
     def test_supported_platforms_are_explicit(self):
         self.assertEqual(L.SUPPORTED_PLATFORMS, ("linux-x86_64",))
 
     def test_every_error_code_has_a_message(self):
-        for code in ("no-key", "no-key-fork", "bad-key", "unsupported-platform", "artifact-unavailable",
+        for code in ("no-key", "no-key-fork", "no-oidc", "bad-oidc", "oidc-expired", "trial-expired", "paid-expired",
+                     "bad-key", "unsupported-platform", "artifact-unavailable",
                      "signature-failed", "digest-failed", "download-failed", "service-unavailable",
                      "client-too-old", "manifest-invalid"):
             self.assertIn(code, L.MESSAGES)

@@ -1,5 +1,5 @@
 name: "Presift — MySQL migration safety"
-description: "Presift checks MySQL migrations for locking, table-rebuilding and destructive changes before they merge. Runs entirely on your runner; your migration files never leave it."
+description: "Presift checks MySQL migrations for locking, table-rebuilding and destructive changes before they merge. Runs entirely on your runner; your migration files never leave it. 30-day evaluation starts automatically in Actions."
 author: "Nishu"
 branding:
   icon: "shield"
@@ -22,8 +22,9 @@ inputs:
     required: false
     default: ""
   license:
-    description: "Evaluation or organisation key (store it as a repository secret). Required: without a valid key the step fails with an entitlement message."
-    required: true
+    description: "Organisation key (store it as a repository secret). Leave empty in GitHub Actions to use your organisation's 30-day evaluation: the job then needs `permissions: id-token: write`."
+    required: false
+    default: ""
   channel:
     description: "Release channel: stable (default) or beta"
     required: false

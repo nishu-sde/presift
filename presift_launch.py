@@ -21,16 +21,22 @@ import stat
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-CLIENT_VERSION = "1.1.0"
+CLIENT_VERSION = "1.2.0"
 SERVICE_URL = os.environ.get("PRESIFT_SERVICE_URL", "https://api.presift.dev")
 TRIAL_URL = "https://presift.dev/trial"
 PRICING_URL = "https://presift.dev/pricing"
 KEY_URL = "https://presift.dev/key"
 KEY_ENV = "PRESIFT_LICENSE"
+# Actions-attested trial: in GitHub Actions, with `permissions: id-token: write`, the launcher asks GitHub for the job's
+# OIDC token for exactly this audience and exchanges it at the service for a short-lived trial key bound to the
+# repository owner. The OIDC token is used once, in memory, and is never printed, stored or passed to the core.
+OIDC_AUDIENCE = "https://api.presift.dev"
+OIDC_URL_ENV, OIDC_TOKEN_ENV = "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 SUPPORTED_PLATFORMS = ("linux-x86_64",)
 NETWORK_TIMEOUT = 30
 MAX_ARTIFACT_BYTES = 200 * 1024 * 1024
@@ -55,7 +61,13 @@ def _fork_context() -> bool:
 
 
 MESSAGES = {
-    "no-key": f"Presift needs an evaluation or organisation key in {KEY_ENV}. Get a free 30-day evaluation key at {TRIAL_URL}.",
+    "no-key": f"Presift needs an organisation key in {KEY_ENV}, or — in GitHub Actions — `permissions: id-token: write` so the 30-day evaluation starts automatically. See {TRIAL_URL}.",
+    "no-oidc": ("Presift can start your organisation's 30-day evaluation automatically, but this job may not request an OIDC token. "
+                f"Add `permissions: id-token: write` to the job (or set the license input with an organisation key). See {TRIAL_URL}."),
+    "bad-oidc": "GitHub's job token was not accepted by the Presift service — refusing to run.",
+    "oidc-expired": "GitHub's job token had expired before it reached the Presift service; re-run the job.",
+    "trial-expired": f"the 30-day evaluation for '{{org}}' ended on {{ended}}. Continued use needs an organisation licence: {PRICING_URL}",
+    "paid-expired": f"the organisation licence has expired (grace period over). Renew at {PRICING_URL} or retrieve the current key at {KEY_URL}.",
     "no-key-fork": (f"Presift needs an evaluation or organisation key in {KEY_ENV}, but GitHub does not provide "
                     "repository secrets to workflows triggered from a fork or by a restricted actor. Run the check on "
                     "the base repository, in a merge queue, or after merge."),
@@ -71,8 +83,13 @@ MESSAGES = {
 }
 
 
+class _Blank(dict):
+    def __missing__(self, key: str) -> str:
+        return "?"
+
+
 def fail(code: str, **fmt: Any) -> int:
-    text = MESSAGES.get(code, code).format(**fmt)
+    text = MESSAGES.get(code, code).format_map(_Blank(fmt))
     sys.stderr.write(f"presift: {text}\n")
     if os.environ.get("GITHUB_ACTIONS") == "true":
         sys.stdout.write(f"::error title=Presift ({code})::{text}\n")
@@ -308,6 +325,42 @@ def download(url: str, target: Path, expected_size: int) -> Optional[str]:
             tmp.unlink(missing_ok=True)
 
 
+def attested_trial_key() -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+    """Exchange the job's GitHub OIDC token for a short-lived trial key. Returns (key, error_code, details)."""
+    url, bearer = os.environ.get(OIDC_URL_ENV, ""), os.environ.get(OIDC_TOKEN_ENV, "")
+    if not url or not bearer:
+        return None, "no-oidc", {}
+    sep = "&" if "?" in url else "?"
+    req = urllib.request.Request(f"{url}{sep}audience={urllib.parse.quote(OIDC_AUDIENCE, safe='')}",
+                                 headers={"authorization": f"bearer {bearer}", "accept": "application/json",
+                                          "user-agent": f"presift-launcher/{CLIENT_VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:
+            jwt = str(json.loads(response.read().decode()).get("value", ""))
+    except Exception:
+        return None, "no-oidc", {}
+    if jwt.count(".") != 2:
+        return None, "no-oidc", {}
+    body = json.dumps({"client_version": CLIENT_VERSION}).encode()
+    req = urllib.request.Request(f"{SERVICE_URL}/trial/actions", data=body, method="POST",
+                                 headers={"content-type": "application/json", "authorization": f"Bearer {jwt}",
+                                          "user-agent": f"presift-launcher/{CLIENT_VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:
+            payload = json.loads(response.read().decode())
+            key = str(payload.get("key", ""))
+            return (key, None, payload) if key.startswith("PS1.") else (None, "service-unavailable", {})
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.loads(e.read().decode())
+        except Exception:
+            payload = {}
+        code = str(payload.get("code", "")) or ("bad-oidc" if e.code in (401, 403) else "service-unavailable")
+        return None, code, payload
+    except Exception:
+        return None, "service-unavailable", {}
+
+
 def ensure_release(key: str, channel: str, core_version: Optional[str]) -> tuple[Optional[Path], Optional[str], dict[str, Any]]:
     payload, error = request_release(key, channel, core_version)
     if error or not payload:
@@ -363,10 +416,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     channel = os.environ.get("PRESIFT_CHANNEL", "stable")
     core_version = os.environ.get("PRESIFT_CORE_VERSION") or None
     key = os.environ.get(KEY_ENV, "").strip()
+    trial_note = ""
     if not key:
-        return fail("no-key-fork" if _fork_context() else "no-key")
+        if _fork_context():
+            return fail("no-key-fork")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            key, problem, details = attested_trial_key()
+            if problem:
+                return fail(problem, org=str(details.get("org", "?")), ended=str(details.get("ended", "?")))
+            trial_note = f"Presift evaluation for '{details.get('org')}' — ends {details.get('trial_ends')} ({PRICING_URL})"
+        else:
+            return fail("no-key")
     if not key.startswith("PS1.") or key.count(".") != 2:
         return fail("bad-key")
+    if trial_note:
+        sys.stderr.write(f"presift: {trial_note}\n")
     if current_platform() not in SUPPORTED_PLATFORMS:
         return fail("unsupported-platform", platform=current_platform())
 

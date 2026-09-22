@@ -1,10 +1,9 @@
-# Evaluation (no key): the job's OIDC permission lets Presift start your organisation's 30-day
-# evaluation automatically. Fails the pull request on error-severity findings.
+# Paid organisation: the annual key is stored as a secret and passed as `license`; it takes precedence
+# over the evaluation, so `id-token: write` is not needed.
 name: migration-safety
 on: [pull_request]
 permissions:
   contents: read
-  id-token: write
 jobs:
   presift:
     runs-on: ubuntu-latest
@@ -14,3 +13,4 @@ jobs:
         with:
           paths: db/migrations
           fail-on: error
+          license: ${{ secrets.PRESIFT_LICENSE }}
