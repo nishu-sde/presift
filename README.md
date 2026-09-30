@@ -96,7 +96,7 @@ circumvented, or that the build is bit-for-bit reproducible. None of those are c
 | `rules` | all | comma-separated rule ids to enable |
 | `license` | – | organisation key (paid); leave empty for the evaluation |
 | `channel` | `stable` | release channel |
-| `core-version` | newest | pin an exact Presift version |
+| `core-version` | newest | pin an exact Presift version (not older than the minimum this client accepts; see docs/errors.md `release-mismatch`) |
 
 Per-project settings — enabling and disabling rules, severity overrides, ignored paths — live in a
 `presift.toml` next to your migrations. See [`examples/presift.toml`](examples/presift.toml).

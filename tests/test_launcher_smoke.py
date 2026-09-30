@@ -192,3 +192,18 @@ class HostileServiceAnswers(unittest.TestCase):
             self.assertTrue(L.secure_url(url), url)
         for url in ("http://api.presift.dev", "file:///etc/passwd", "ftp://x/y", "data:,x", "https://", ""):
             self.assertFalse(L.secure_url(url), url)
+
+
+class ReleaseContext(unittest.TestCase):
+    """An authentic manifest must also be the release that was asked for (rollback / substitution)."""
+
+    M = {**HostileServiceAnswers.BASE, "version": "0.4.0"}
+
+    def test_matching_release_is_accepted(self):
+        self.assertIsNone(L.release_context_problem(self.M, "stable", None))
+        self.assertIsNone(L.release_context_problem(self.M, "stable", "0.4.0"))
+
+    def test_other_channel_other_pin_or_below_floor_is_refused(self):
+        self.assertEqual(L.release_context_problem(self.M, "beta", None), "release-mismatch")
+        self.assertEqual(L.release_context_problem(self.M, "stable", "0.4.1"), "release-mismatch")
+        self.assertEqual(L.release_context_problem({**self.M, "version": "0.3.9"}, "stable", None), "release-mismatch")

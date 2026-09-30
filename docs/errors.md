@@ -24,6 +24,7 @@ tagged with the stable code below. Codes do not change between releases; wording
 | `download-failed` | network failure while downloading | retry; check egress from the runner |
 | `service-unavailable` | the release service could not be reached | the run falls back to a verified cached release when one exists, otherwise retry later |
 | `manifest-invalid` | the service returned a manifest that does not meet the expected shape or format (checked, with its signature, before anything is downloaded) | report it |
+| `release-mismatch` | the service offered an authentic release that is not the one requested — another channel, not the pinned `core-version`, or older than the minimum core this client accepts (`0.4.0` for client 1.2.1) | report it; do not pin a `core-version` older than the minimum |
 | `insecure-url` | the release service address is not `https://` (plain `http://` is accepted only for a loopback address on the same machine, for development) | unset `PRESIFT_SERVICE_URL`, or point it at an `https://` address |
 | `cache-unsafe` | the cache directory is owned by another user or writable by group/others, so a verified release could be swapped before it runs | set `PRESIFT_CACHE_DIR` to a directory only this user can write (the Action uses the job's private temp directory) |
 

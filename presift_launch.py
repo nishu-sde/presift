@@ -40,6 +40,9 @@ KEY_ENV = "PRESIFT_LICENSE"
 OIDC_AUDIENCE = "https://api.presift.dev"
 OIDC_URL_ENV, OIDC_TOKEN_ENV = "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 SUPPORTED_PLATFORMS = ("linux-x86_64",)
+# Oldest core this client accepts: the newest release published when this client was released. An authentic but older
+# signed release served in place of the current one (a rollback) is refused below this line. Raised with each client.
+MIN_CORE_VERSION = "0.4.0"
 NETWORK_TIMEOUT = 30
 DOWNLOAD_DEADLINE = 900                  # seconds for the whole artefact download, not per read
 MAX_ARTIFACT_BYTES = 200 * 1024 * 1024
@@ -95,6 +98,8 @@ MESSAGES = {
     "service-unavailable": f"the Presift release service is unavailable; try again later, or pin a cached version. Status: {KEY_URL}",
     "client-too-old": "this Presift release needs a newer action version (>= {min_client}); update the action reference.",
     "manifest-invalid": "release verification failed — refusing to run.",
+    "release-mismatch": ("the release service offered a release that does not match this request (channel {channel}, pinned "
+                         "version {pinned}) or is older than this client accepts (minimum core " + MIN_CORE_VERSION + ") — refusing to run."),
     "insecure-url": "the Presift service address must use https:// — refusing to send the key over an insecure connection.",
     "cache-unsafe": ("the Presift cache directory is not private to this user (owned by someone else, or writable by "
                      "group/others) — refusing to run code from it. Set PRESIFT_CACHE_DIR to a private directory."),
@@ -312,6 +317,18 @@ def verify_manifest(manifest: dict[str, Any], signature_b64: str) -> Optional[st
     return None
 
 
+def release_context_problem(manifest: dict[str, Any], channel: str, core_version: Optional[str]) -> Optional[str]:
+    """An authentic manifest must also be the release that was asked for: same channel, the pinned version when one
+    is pinned, and not older than MIN_CORE_VERSION. Blocks substitution of another signed release (rollback)."""
+    if manifest.get("channel") != channel:
+        return "release-mismatch"
+    if core_version and manifest.get("version") != core_version:
+        return "release-mismatch"
+    if version_tuple(str(manifest.get("version", "0"))) < version_tuple(MIN_CORE_VERSION):
+        return "release-mismatch"
+    return None
+
+
 def verify_release(manifest: dict[str, Any], signature_b64: str, artefact: Path) -> Optional[str]:
     """Return an error code, or None when the release is trustworthy."""
     problem = verify_manifest(manifest, signature_b64)
@@ -460,7 +477,7 @@ def ensure_release(key: str, channel: str, core_version: Optional[str]) -> tuple
         return None, "manifest-invalid", {}
     signature = str(payload.get("manifest_sig", ""))
     # Authenticate the manifest before any of its fields name a path, a download or a deletion.
-    problem = verify_manifest(manifest, signature)
+    problem = verify_manifest(manifest, signature) or release_context_problem(manifest, channel, core_version)
     if problem:
         return None, problem, manifest
     if private_cache_root() is None:
@@ -500,7 +517,7 @@ def newest_cached(channel: str, core_version: Optional[str]) -> Optional[tuple[P
                 signature = (slot / "manifest.sig").read_text().strip()
             except Exception:
                 continue
-            if channel and manifest.get("channel") != channel:
+            if release_context_problem(manifest, channel, core_version):
                 continue
             artefact = slot / manifest.get("filename", "")
             if verify_release(manifest, signature, artefact) is None:
@@ -535,7 +552,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     artefact, error, manifest = ensure_release(key, channel, core_version)
     if error or artefact is None:
         return fail(error or "service-unavailable", platform=current_platform(), channel=channel,
-                    client=CLIENT_VERSION, min_client=str(manifest.get("min_client", "?")))
+                    client=CLIENT_VERSION, min_client=str(manifest.get("min_client", "?")), pinned=core_version or "none")
     prune_cache()
 
     import subprocess
