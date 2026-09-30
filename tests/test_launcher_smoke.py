@@ -170,3 +170,25 @@ class Contract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostileServiceAnswers(unittest.TestCase):
+    """A compromised or impersonated service must not be able to name paths or insecure URLs."""
+
+    BASE = {"schema": "presift.release/1", "product": "presift", "version": "1.0.0", "platform": "linux-x86_64",
+            "filename": "presift-1.0.0", "channel": "stable", "artifact_sha256": "sha256:" + "0" * 64,
+            "size": 10, "min_client": "1.0.0", "key_id": "presift-release-1"}
+
+    def test_path_like_manifest_fields_are_malformed(self):
+        self.assertEqual(L.manifest_problems(self.BASE), [])
+        for field, value in (("version", "../../x"), ("version", "/abs"), ("platform", "../x"),
+                             ("artifact_sha256", "sha256:../../../" + "0" * 55), ("filename", "../x"),
+                             ("filename", ".x"), ("channel", "../x"), ("key_id", "../x")):
+            with self.subTest(field=field, value=value):
+                self.assertIn(field, L.manifest_problems({**self.BASE, field: value}))
+
+    def test_only_https_or_loopback_urls(self):
+        for url in ("https://api.presift.dev", *("http" + "://" + h + "/x" for h in L.LOOPBACK_HOSTS[:2])):
+            self.assertTrue(L.secure_url(url), url)
+        for url in ("http://api.presift.dev", "file:///etc/passwd", "ftp://x/y", "data:,x", "https://", ""):
+            self.assertFalse(L.secure_url(url), url)

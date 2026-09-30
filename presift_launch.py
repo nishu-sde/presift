@@ -16,17 +16,19 @@ import hashlib
 import json
 import os
 import platform as _platform
+import re
 import shutil
 import stat
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-CLIENT_VERSION = "1.2.0"
+CLIENT_VERSION = "1.2.1"
 SERVICE_URL = os.environ.get("PRESIFT_SERVICE_URL", "https://api.presift.dev")
 TRIAL_URL = "https://presift.dev/trial"
 PRICING_URL = "https://presift.dev/pricing"
@@ -39,7 +41,20 @@ OIDC_AUDIENCE = "https://api.presift.dev"
 OIDC_URL_ENV, OIDC_TOKEN_ENV = "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 SUPPORTED_PLATFORMS = ("linux-x86_64",)
 NETWORK_TIMEOUT = 30
+DOWNLOAD_DEADLINE = 900                  # seconds for the whole artefact download, not per read
 MAX_ARTIFACT_BYTES = 200 * 1024 * 1024
+MAX_RESPONSE_BYTES = 1024 * 1024         # a service or OIDC answer is a few kilobytes; never read more than this
+# Every manifest field that becomes part of a filesystem path or is compared is held to a strict format, so a
+# malformed or hostile service answer can never name a location outside the cache.
+VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}$")
+PLATFORM_RE = re.compile(r"^[a-z0-9]{1,16}-[a-z0-9_]{1,16}$")
+CHANNEL_RE = re.compile(r"^[a-z]{1,16}$")
+KEY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+# Given to the release service's GitHub OIDC exchange only; never inherited by the executed core.
+CHILD_ENV_DROP = ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL")
 
 # Release verification keys: the public halves of the release signing identities. Fixed in this file
 # on purpose — there is no environment override for the stable path, so a runner's environment cannot
@@ -80,6 +95,9 @@ MESSAGES = {
     "service-unavailable": f"the Presift release service is unavailable; try again later, or pin a cached version. Status: {KEY_URL}",
     "client-too-old": "this Presift release needs a newer action version (>= {min_client}); update the action reference.",
     "manifest-invalid": "release verification failed — refusing to run.",
+    "insecure-url": "the Presift service address must use https:// — refusing to send the key over an insecure connection.",
+    "cache-unsafe": ("the Presift cache directory is not private to this user (owned by someone else, or writable by "
+                     "group/others) — refusing to run code from it. Set PRESIFT_CACHE_DIR to a private directory."),
 }
 
 
@@ -200,16 +218,15 @@ def manifest_problems(m: dict[str, Any]) -> list[str]:
         problems.append("schema")
     if m.get("product") != "presift":
         problems.append("product")
-    for key in ("version", "platform", "filename", "artifact_sha256", "min_client", "key_id", "channel"):
-        if not m.get(key):
+    formats = {"version": VERSION_RE, "platform": PLATFORM_RE, "filename": FILENAME_RE, "artifact_sha256": DIGEST_RE,
+               "min_client": VERSION_RE, "key_id": KEY_ID_RE, "channel": CHANNEL_RE}
+    for key, pattern in formats.items():
+        if not isinstance(m.get(key), str) or not pattern.match(m[key]):
             problems.append(key)
-    digest = str(m.get("artifact_sha256", ""))
-    if not digest.startswith("sha256:") or len(digest) != 71:
-        problems.append("artifact_sha256")
-    if not isinstance(m.get("size"), int) or m["size"] <= 0 or m["size"] > MAX_ARTIFACT_BYTES:
+    if m.get("max_client") is not None and (not isinstance(m["max_client"], str) or not VERSION_RE.match(m["max_client"])):
+        problems.append("max_client")
+    if not isinstance(m.get("size"), int) or isinstance(m.get("size"), bool) or m["size"] <= 0 or m["size"] > MAX_ARTIFACT_BYTES:
         problems.append("size")
-    if "/" in str(m.get("filename", "")) or str(m.get("filename", "")).startswith("."):
-        problems.append("filename")
     return problems
 
 
@@ -228,9 +245,35 @@ def cache_root() -> Path:
     return Path.home() / ".cache" / "presift"
 
 
-def cache_slot(manifest: dict[str, Any]) -> Path:
+def private_cache_root() -> Optional[Path]:
+    """The cache root, created private (0700) if new; None when it is not private to this user.
+
+    Code is executed from this directory, so it must not be writable by anyone else: a directory owned by
+    another user, or writable by group/others, could have its verified artefact swapped before it runs.
+    """
+    root = cache_root()
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        st = root.stat()
+    except OSError:
+        return None
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return None
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return None
+    return root
+
+
+def cache_slot(manifest: dict[str, Any]) -> Optional[Path]:
+    """Cache location for a manifest that already passed manifest_problems(); None if it would leave the cache."""
+    root = cache_root()
     digest = manifest["artifact_sha256"].split(":", 1)[1][:16]
-    return cache_root() / "artifacts" / manifest["platform"] / manifest["version"] / digest
+    slot = root / "artifacts" / manifest["platform"] / manifest["version"] / digest
+    try:
+        slot.resolve().relative_to(root.resolve())
+    except ValueError:
+        return None
+    return slot
 
 
 def digest_file(path: Path) -> str:
@@ -253,15 +296,27 @@ def prune_cache(keep: int = 2) -> None:
 
 
 # --- verification --------------------------------------------------------------------------------
-def verify_release(manifest: dict[str, Any], signature_b64: str, artefact: Path) -> Optional[str]:
-    """Return an error code, or None when the release is trustworthy."""
+def verify_manifest(manifest: dict[str, Any], signature_b64: str) -> Optional[str]:
+    """Format and signature of the manifest alone. Runs before anything is downloaded or written."""
     if manifest_problems(manifest):
         return "manifest-invalid"
     public_key = TRUSTED_KEYS.get(str(manifest.get("key_id")))
     if not public_key:
         return "signature-failed"
-    if not ed25519_verify(b64url_decode(public_key), b64url_decode(signature_b64), canonical(manifest)):
+    try:
+        signature = b64url_decode(signature_b64)
+    except Exception:
         return "signature-failed"
+    if not ed25519_verify(b64url_decode(public_key), signature, canonical(manifest)):
+        return "signature-failed"
+    return None
+
+
+def verify_release(manifest: dict[str, Any], signature_b64: str, artefact: Path) -> Optional[str]:
+    """Return an error code, or None when the release is trustworthy."""
+    problem = verify_manifest(manifest, signature_b64)
+    if problem:
+        return problem
     if manifest["platform"] != current_platform():
         return "unsupported-platform"
     if version_tuple(CLIENT_VERSION) < version_tuple(manifest["min_client"]):
@@ -276,19 +331,41 @@ def verify_release(manifest: dict[str, Any], signature_b64: str, artefact: Path)
 
 
 # --- service + download --------------------------------------------------------------------------
+def secure_url(url: str) -> bool:
+    """https:// anywhere; plain http:// only to this machine (local development and tests)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme == "https" and parts.hostname:
+        return True
+    return parts.scheme == "http" and parts.hostname in LOOPBACK_HOSTS
+
+
+def read_json(response: Any) -> Any:
+    """Parse a bounded JSON answer; anything larger than MAX_RESPONSE_BYTES is refused, not buffered."""
+    data = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise ValueError("response too large")
+    return json.loads(data.decode())
+
+
 def request_release(key: str, channel: str, core_version: Optional[str]) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """Ask the release service for a manifest, signature and short-lived URL. Sends nothing else."""
+    if not secure_url(SERVICE_URL):
+        return None, "insecure-url"
     body = json.dumps({"key": key, "client_version": CLIENT_VERSION, "platform": current_platform(),
                        "channel": channel, **({"core_version": core_version} if core_version else {})}).encode()
     req = urllib.request.Request(f"{SERVICE_URL}/download", data=body, method="POST",
                                  headers={"content-type": "application/json",
                                           "user-agent": f"presift-launcher/{CLIENT_VERSION}"})
     try:
-        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:
-            return json.loads(response.read().decode()), None
+        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:  # nosec B310 - scheme checked by secure_url
+            payload = read_json(response)
+            return (payload, None) if isinstance(payload, dict) else (None, "service-unavailable")
     except urllib.error.HTTPError as e:
         try:
-            code = json.loads(e.read().decode()).get("code", "")
+            code = str(read_json(e).get("code", ""))
         except Exception:
             code = ""
         return None, code or ("bad-key" if e.code in (401, 403) else "artifact-unavailable" if e.code == 404 else "service-unavailable")
@@ -297,15 +374,20 @@ def request_release(key: str, channel: str, core_version: Optional[str]) -> tupl
 
 
 def download(url: str, target: Path, expected_size: int) -> Optional[str]:
-    target.parent.mkdir(parents=True, exist_ok=True)
+    if not secure_url(url):
+        return "download-failed"
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".part")
     os.close(fd)                       # never hold a write handle: an open fd makes exec fail (ETXTBSY)
     tmp = Path(tmp_name)
     try:
         req = urllib.request.Request(url, headers={"user-agent": f"presift-launcher/{CLIENT_VERSION}"})
         written = 0
-        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response, tmp.open("wb") as fh:
+        deadline = time.monotonic() + DOWNLOAD_DEADLINE
+        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response, tmp.open("wb") as fh:  # nosec B310
             while True:
+                if time.monotonic() > deadline:
+                    return "download-failed"
                 block = response.read(1024 * 1024)
                 if not block:
                     break
@@ -330,13 +412,17 @@ def attested_trial_key() -> tuple[Optional[str], Optional[str], dict[str, Any]]:
     url, bearer = os.environ.get(OIDC_URL_ENV, ""), os.environ.get(OIDC_TOKEN_ENV, "")
     if not url or not bearer:
         return None, "no-oidc", {}
+    if not secure_url(url):
+        return None, "no-oidc", {}
+    if not secure_url(SERVICE_URL):
+        return None, "insecure-url", {}
     sep = "&" if "?" in url else "?"
     req = urllib.request.Request(f"{url}{sep}audience={urllib.parse.quote(OIDC_AUDIENCE, safe='')}",
                                  headers={"authorization": f"bearer {bearer}", "accept": "application/json",
                                           "user-agent": f"presift-launcher/{CLIENT_VERSION}"})
     try:
-        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:
-            jwt = str(json.loads(response.read().decode()).get("value", ""))
+        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:  # nosec B310 - scheme checked above
+            jwt = str(read_json(response).get("value", ""))
     except Exception:
         return None, "no-oidc", {}
     if jwt.count(".") != 2:
@@ -346,13 +432,14 @@ def attested_trial_key() -> tuple[Optional[str], Optional[str], dict[str, Any]]:
                                  headers={"content-type": "application/json", "authorization": f"Bearer {jwt}",
                                           "user-agent": f"presift-launcher/{CLIENT_VERSION}"})
     try:
-        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:
-            payload = json.loads(response.read().decode())
+        with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as response:  # nosec B310 - scheme checked above
+            payload = read_json(response)
             key = str(payload.get("key", ""))
             return (key, None, payload) if key.startswith("PS1.") else (None, "service-unavailable", {})
     except urllib.error.HTTPError as e:
         try:
-            payload = json.loads(e.read().decode())
+            payload = read_json(e)
+            payload = payload if isinstance(payload, dict) else {}
         except Exception:
             payload = {}
         code = str(payload.get("code", "")) or ("bad-oidc" if e.code in (401, 403) else "service-unavailable")
@@ -369,8 +456,16 @@ def ensure_release(key: str, channel: str, core_version: Optional[str]) -> tuple
             return cached[0], None, cached[1]
         return None, error or "service-unavailable", {}
     manifest = payload.get("manifest") or {}
+    if not isinstance(manifest, dict):
+        return None, "manifest-invalid", {}
     signature = str(payload.get("manifest_sig", ""))
-    slot = cache_slot(manifest) if not manifest_problems(manifest) else None
+    # Authenticate the manifest before any of its fields name a path, a download or a deletion.
+    problem = verify_manifest(manifest, signature)
+    if problem:
+        return None, problem, manifest
+    if private_cache_root() is None:
+        return None, "cache-unsafe", manifest
+    slot = cache_slot(manifest)
     if slot is None:
         return None, "manifest-invalid", manifest
     artefact = slot / manifest["filename"]
@@ -390,7 +485,10 @@ def ensure_release(key: str, channel: str, core_version: Optional[str]) -> tuple
 
 def newest_cached(channel: str, core_version: Optional[str]) -> Optional[tuple[Path, dict[str, Any]]]:
     """Most recent cached release that still verifies. Used only when the service is unreachable."""
-    base = cache_root() / "artifacts" / current_platform()
+    root = private_cache_root()
+    if root is None:
+        return None
+    base = root / "artifacts" / current_platform()
     if not base.is_dir():
         return None
     for version_dir in sorted((d for d in base.iterdir() if d.is_dir()), key=lambda d: version_tuple(d.name), reverse=True):
@@ -441,7 +539,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     prune_cache()
 
     import subprocess
-    completed = subprocess.run([str(artefact), *argv], env={**os.environ, KEY_ENV: key})
+    child_env = {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
+    completed = subprocess.run([str(artefact), *argv], env={**child_env, KEY_ENV: key})  # nosec B603 - verified artefact, no shell
     return completed.returncode
 
 

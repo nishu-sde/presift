@@ -43,8 +43,8 @@ class PublicBoundary(unittest.TestCase):
         source = (ROOT / "presift_launch.py").read_text()
         modules = {m.split(".")[0] for m in
                    re.findall(r"^\s*(?:import|from)\s+([A-Za-z_][\w.]*)", source, re.M)}
-        stdlib = {"__future__", "base64", "hashlib", "json", "os", "pathlib", "platform", "shutil",
-                  "stat", "subprocess", "sys", "tempfile", "typing", "urllib"}
+        stdlib = {"__future__", "base64", "hashlib", "json", "os", "pathlib", "platform", "re", "shutil",
+                  "stat", "subprocess", "sys", "tempfile", "time", "typing", "urllib"}
         self.assertLessEqual(modules, stdlib, f"non-stdlib imports: {modules - stdlib}")
 
     def test_no_secret_material(self):

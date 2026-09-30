@@ -23,12 +23,15 @@ tagged with the stable code below. Codes do not change between releases; wording
 | `digest-failed` | the downloaded bytes do not match the signed digest | usually a truncated or tampered download; the file is deleted, retry once, then report it |
 | `download-failed` | network failure while downloading | retry; check egress from the runner |
 | `service-unavailable` | the release service could not be reached | the run falls back to a verified cached release when one exists, otherwise retry later |
-| `manifest-invalid` | the service returned a manifest that does not meet the expected shape | report it |
+| `manifest-invalid` | the service returned a manifest that does not meet the expected shape or format (checked, with its signature, before anything is downloaded) | report it |
+| `insecure-url` | the release service address is not `https://` (plain `http://` is accepted only for a loopback address on the same machine, for development) | unset `PRESIFT_SERVICE_URL`, or point it at an `https://` address |
+| `cache-unsafe` | the cache directory is owned by another user or writable by group/others, so a verified release could be swapped before it runs | set `PRESIFT_CACHE_DIR` to a directory only this user can write (the Action uses the job's private temp directory) |
 
 The evaluation token obtained in GitHub Actions is used in memory for the job only: it is never written to disk, cached or printed.
 
 `signature-failed`, `digest-failed` and `manifest-invalid` mean verification failed. Nothing is
-executed in those cases and the cached slot is removed.
+executed in those cases. A manifest that fails its format or signature check is refused before anything is
+downloaded or written; a downloaded file that fails its digest is deleted.
 
 ## Analysis exit codes
 
